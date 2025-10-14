@@ -174,8 +174,8 @@ class BitcoinKeyGenerator:
                 
                 successful_generations += 1
                 
-                # 检查是否以1PWo3J开头
-                if address.startswith('1PWo3J'):
+                # 检查是否以1PWo3JeB开头
+                if address.startswith('1PWo3JeB'):
                     wif_key = self.private_key_to_wif(private_key)
                     if wif_key:
                         result = {
@@ -221,7 +221,7 @@ class BitcoinKeyGenerator:
         self.is_running = True
         
         print(f"开始生成密钥...")
-        print(f"目标前缀: 1PWo3J")
+        print(f"目标前缀: 1PWo3JeB")
         print(f"私钥范围: 2^70 到 2^71")
         print(f"每批次: {batch_size} 个密钥")
         
