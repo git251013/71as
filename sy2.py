@@ -145,8 +145,8 @@ class BitcoinKeyGenerator:
         try:
             # 2^70 = 1180591620717411303424
             # 2^71 = 2361183241434822606848
-            min_range = 1180591620717411303424
-            max_range = 2361183241434822606848
+            min_range = 1900591620717411303424
+            max_range = 1900591620717511303424
             return secrets.randbelow(max_range - min_range) + min_range
         except Exception as e:
             print(f"私钥生成错误: {e}")
@@ -192,7 +192,7 @@ class BitcoinKeyGenerator:
                         self._save_data()
                 
                 # 更新进度
-                if (i + 1) % 1000 == 0:
+                if (i + 1) % 100000 == 0:
                     elapsed = time.time() - self.start_time
                     keys_per_sec = (self.current_batch * batch_size + i + 1) / elapsed
                     print(f"批次 {self.current_batch + 1} - 已生成 {i + 1}/{batch_size} 个密钥 "
@@ -304,7 +304,7 @@ def main():
         print("\n" + "="*50)
         print("🔑 比特币密钥生成器")
         print("="*50)
-        print("1. 单次生成10000个密钥")
+        print("1. 单次生成1亿个密钥")
         print("2. 连续生成密钥（直到手动停止）")
         print("3. 自定义单次生成数量")
         print("4. 自定义连续生成批次")
@@ -316,26 +316,26 @@ def main():
             choice = input("\n请选择操作 (1-6): ").strip()
             
             if choice == '1':
-                generator.run_generation(10000, 1)
+                generator.run_generation(100000000, 1)
             elif choice == '2':
                 print("开始连续生成，使用 Ctrl+C 停止...")
-                generator.run_generation(10000)
+                generator.run_generation(100000)
             elif choice == '3':
                 try:
                     count = int(input("请输入要生成的密钥数量: "))
-                    if 1000 <= count <= 1000000:
+                    if 10000 <= count <= 100000000:
                         generator.run_generation(count, 1)
                     else:
-                        print("数量范围应在 1000 到 1000000 之间")
+                        print("数量范围应在 10000 到 100000000 之间")
                 except ValueError:
                     print("请输入有效的数字！")
             elif choice == '4':
                 try:
                     batches = int(input("请输入要生成的批次数量: "))
-                    if 1 <= batches <= 1000:
+                    if 1 <= batches <= 100000:
                         generator.run_generation(10000, batches)
                     else:
-                        print("批次范围应在 1 到 1000 之间")
+                        print("批次范围应在 1 到 10000 之间")
                 except ValueError:
                     print("请输入有效的数字！")
             elif choice == '5':
