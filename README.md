@@ -1,4 +1,2 @@
             continue
-
-if __name__ == "__main__":
-    main()
+            继续努力
