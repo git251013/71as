@@ -6,29 +6,29 @@ import signal
 import threading
 import atexit
 import traceback
+import subprocess
+import tempfile
 from typing import List, Dict, Any
 import numpy as np
 
-# 依赖检查 - 只安装GPU相关库
+# 设置环境变量，强制使用 nvcc
+os.environ["CUDA_NVCC_EXECUTABLE"] = "/usr/local/cuda/bin/nvcc"
+
+# 依赖检查 - 只安装必要的GPU库
 def install_gpu_dependencies():
     """安装GPU相关依赖包"""
-    gpu_dependencies = ["cupy-cuda11x"]
+    dependencies = ["cupy-cuda11x", "base58", "ecdsa"]
     
-    # 检查是否安装pycuda，如果失败则跳过
-    try:
-        import pycuda.autoinit
-        gpu_dependencies.append("pycuda")
-        print("✓ PyCUDA 已安装")
-    except ImportError:
-        print("⚠ PyCUDA 不可用，将使用纯CuPy实现")
-    
-    for dep in gpu_dependencies:
+    for dep in dependencies:
         try:
             if dep.startswith("cupy"):
                 import cupy
                 print(f"✓ {dep} 已安装")
-            elif dep == "pycuda":
-                import pycuda.autoinit
+            elif dep == "base58":
+                import base58
+                print(f"✓ {dep} 已安装")
+            elif dep == "ecdsa":
+                import ecdsa
                 print(f"✓ {dep} 已安装")
         except ImportError:
             print(f"正在安装 {dep}...")
@@ -36,78 +36,24 @@ def install_gpu_dependencies():
             try:
                 if dep.startswith("cupy"):
                     import cupy
-                elif dep == "pycuda":
-                    import pycuda.autoinit
+                elif dep == "base58":
+                    import base58
+                elif dep == "ecdsa":
+                    import ecdsa
                 print(f"✓ {dep} 安装成功")
             except ImportError:
-                print(f"✗ {dep} 安装失败，将继续使用可用组件")
+                print(f"✗ {dep} 安装失败")
 
-# 安装GPU依赖
+# 安装依赖
 install_gpu_dependencies()
 
-# 导入GPU库
+# 导入主库
 import cupy as cp
+import base58
+import ecdsa
 
-# 尝试导入PyCUDA，如果失败则使用纯CuPy实现
-try:
-    import pycuda.driver as cuda
-    from pycuda.compiler import SourceModule
-    import pycuda.gpuarray as gpuarray
-    from pycuda.tools import clear_context_caches
-    HAS_PYCUDA = True
-except ImportError:
-    HAS_PYCUDA = False
-    print("PyCUDA 不可用，将使用纯CuPy实现")
-
-# 简化的 CUDA 内核代码 - 使用兼容性更好的语法
-BITCOIN_CUDA_KERNEL_SIMPLE = """
-// 简化的比特币地址生成内核
-extern "C" {
-__global__ void bitcoin_simple_kernel(
-    unsigned long long *private_keys, 
-    unsigned char *results, 
-    int batch_size,
-    unsigned long long min_range,
-    unsigned long long max_range
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= batch_size) return;
-    
-    unsigned long long private_key;
-    if (private_keys == 0) {
-        // 如果没有提供私钥，则生成一个
-        private_key = min_range + (idx % (max_range - min_range));
-    } else {
-        private_key = private_keys[idx];
-    }
-    
-    // 简化的地址匹配逻辑
-    // 在实际实现中，这里应该生成完整的比特币地址
-    unsigned char matches_target = 0;
-    
-    // 基于私钥的简单哈希计算
-    unsigned long long hash_val = private_key;
-    for (int i = 0; i < 10; i++) {
-        hash_val = (hash_val * 6364136223846793005ULL + 1ULL);
-    }
-    
-    // 简化的前缀检查逻辑 - 实际应生成完整地址
-    if ((hash_val & 0xFFFF) == 0x1PWo) {  // 简化的匹配条件
-        matches_target = 1;
-    }
-    
-    // 存储结果
-    results[idx] = matches_target;
-    
-    // 同时存储私钥到结果数组
-    unsigned long long *result_keys = (unsigned long long*)(results + batch_size);
-    result_keys[idx] = private_key;
-}
-}
-"""
-
-class PureCuPyBitcoinGenerator:
-    def __init__(self, data_file="pure_gpu_keys.json"):
+class NVCUBitcoinGenerator:
+    def __init__(self, data_file="nvcc_gpu_keys.json"):
         self.data_file = data_file
         self.is_running = True
         self.current_batch = 0
@@ -132,7 +78,7 @@ class PureCuPyBitcoinGenerator:
         try:
             # CuPy初始化
             gpu_count = cp.cuda.runtime.getDeviceCount()
-            print(f"CuPy GPU设备: {gpu_count}")
+            print(f"检测到 {gpu_count} 个GPU设备")
             
             for i in range(gpu_count):
                 props = cp.cuda.runtime.getDeviceProperties(i)
@@ -142,35 +88,117 @@ class PureCuPyBitcoinGenerator:
             
             cp.cuda.Device(0).use()
             
-            # 尝试编译CUDA内核（如果PyCUDA可用）
-            if HAS_PYCUDA:
-                try:
-                    # 设置nvcc编译选项，兼容旧版gcc
-                    nvcc_options = [
-                        '-arch=sm_35',  # 兼容较旧的架构
-                        '-Xcompiler', '-fPIC',
-                        '--compiler-options', '-fno-strict-aliasing',
-                        '-O2'
-                    ]
-                    
-                    self.cuda_module = SourceModule(
-                        BITCOIN_CUDA_KERNEL_SIMPLE,
-                        options=nvcc_options,
-                        no_extern_c=True
-                    )
-                    self.bitcoin_kernel = self.cuda_module.get_function("bitcoin_simple_kernel")
-                    print("CUDA内核编译成功")
-                except Exception as e:
-                    print(f"CUDA内核编译失败: {e}")
-                    print("将使用纯CuPy实现")
-                    HAS_PYCUDA = False
-            else:
-                print("使用纯CuPy实现")
-                
+            # 编译CUDA内核
+            self._compile_cuda_kernel()
+            
         except Exception as e:
             print(f"GPU初始化失败: {e}")
             traceback.print_exc()
             sys.exit(1)
+    
+    def _compile_cuda_kernel(self):
+        """使用nvcc编译CUDA内核"""
+        try:
+            # 创建CUDA内核源代码
+            cuda_source = """
+#include <cstdint>
+
+extern "C" {
+__global__ void generate_keys_and_check(
+    uint64_t *keys_output,
+    uint8_t *matches_output,
+    int num_keys,
+    uint64_t min_val,
+    uint64_t max_val,
+    uint64_t seed
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_keys) return;
+    
+    // 使用线程ID和种子生成随机私钥
+    uint64_t private_key = min_val + (
+        (seed * 6364136223846793005ULL + idx * 2862933555777941757ULL) % (max_val - min_val)
+    );
+    
+    // 存储私钥
+    keys_output[idx] = private_key;
+    
+    // 简化的地址匹配逻辑
+    // 在实际实现中，这里应该进行完整的地址生成和检查
+    uint64_t hash = private_key;
+    for (int i = 0; i < 5; i++) {
+        hash = (hash * 6364136223846793005ULL + 1442695040888963407ULL);
+    }
+    
+    // 基于哈希值的简单匹配检查
+    // 实际应该检查地址是否以"1PWo3J"开头
+    uint8_t matches = 0;
+    if ((hash & 0xFFFFFF) == 0x1PWo3J) {  // 简化的匹配条件
+        matches = 1;
+    }
+    
+    matches_output[idx] = matches;
+}
+
+__global__ void sha256_kernel(
+    const uint8_t *input,
+    uint8_t *output,
+    int num_blocks
+) {
+    // 简化的SHA256实现
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_blocks) return;
+    
+    // 实际应实现完整的SHA256
+    for (int i = 0; i < 32; i++) {
+        output[idx * 32 + i] = input[idx * 64 + (i % 64)] ^ i;
+    }
+}
+}
+"""
+            
+            # 创建临时文件保存CUDA源代码
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.cu', delete=False) as f:
+                f.write(cuda_source)
+                cuda_file = f.name
+            
+            # 编译CUDA内核
+            cubin_file = cuda_file.replace('.cu', '.cubin')
+            
+            # 使用nvcc编译
+            nvcc_cmd = [
+                "nvcc",
+                "-cubin",
+                "-arch=sm_60",  # 指定计算能力
+                "-o", cubin_file,
+                cuda_file
+            ]
+            
+            print(f"编译CUDA内核: {' '.join(nvcc_cmd)}")
+            result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"NVCC编译失败: {result.stderr}")
+                raise Exception("CUDA内核编译失败")
+            
+            # 加载编译后的内核
+            with open(cubin_file, 'rb') as f:
+                cubin = f.read()
+            
+            # 使用CuPy加载内核
+            self.keygen_module = cp.RawModule(code=cubin)
+            self.keygen_kernel = self.keygen_module.get_function("generate_keys_and_check")
+            self.sha256_kernel = self.keygen_module.get_function("sha256_kernel")
+            
+            print("CUDA内核编译并加载成功")
+            
+            # 清理临时文件
+            os.unlink(cuda_file)
+            os.unlink(cubin_file)
+            
+        except Exception as e:
+            print(f"CUDA内核编译失败: {e}")
+            print("将使用纯CuPy实现")
     
     def cleanup(self):
         """清理GPU资源"""
@@ -208,7 +236,7 @@ class PureCuPyBitcoinGenerator:
             "found_keys": [],
             "last_update": time.strftime("%Y-%m-%d %H:%M:%S"),
             "start_range": "2^70 to 2^71",
-            "pure_gpu": True
+            "nvcc_compiled": True
         }
     
     def _save_data(self):
@@ -227,79 +255,99 @@ class PureCuPyBitcoinGenerator:
         except Exception as e:
             print(f"保存数据失败: {e}")
     
-    def generate_private_keys_gpu(self, batch_size: int) -> cp.ndarray:
-        """使用GPU生成私钥"""
+    def generate_keys_gpu(self, batch_size: int) -> tuple:
+        """使用GPU生成私钥并初步筛选"""
         min_range = 1180591620717411303424  # 2^70
         max_range = 2361183241434822606848  # 2^71
         
         try:
-            # 使用CuPy在GPU上生成随机数
-            private_keys_gpu = cp.random.randint(min_range, max_range, batch_size, dtype=cp.uint64)
-            return private_keys_gpu
+            # 分配GPU内存
+            keys_gpu = cp.zeros(batch_size, dtype=cp.uint64)
+            matches_gpu = cp.zeros(batch_size, dtype=cp.uint8)
+            
+            # 配置内核参数
+            block_size = 256
+            grid_size = (batch_size + block_size - 1) // block_size
+            seed = cp.uint64(int(time.time() * 1000000))
+            
+            # 执行内核
+            self.keygen_kernel(
+                (grid_size, 1), (block_size, 1, 1),
+                (keys_gpu, matches_gpu, cp.int32(batch_size), 
+                 cp.uint64(min_range), cp.uint64(max_range), seed)
+            )
+            
+            # 等待GPU完成
+            cp.cuda.stream.get_current_stream().synchronize()
+            
+            return keys_gpu, matches_gpu
+            
         except Exception as e:
-            print(f"GPU私钥生成失败: {e}")
-            raise
+            print(f"GPU密钥生成失败: {e}")
+            # 回退到纯CuPy实现
+            return self._generate_keys_fallback(batch_size)
     
-    def process_batch_pure_cupy(self, batch_size: int) -> List[Dict[str, Any]]:
-        """使用纯CuPy处理批次"""
+    def _generate_keys_fallback(self, batch_size: int) -> tuple:
+        """回退方法 - 使用纯CuPy生成私钥"""
+        min_range = 1180591620717411303424
+        max_range = 2361183241434822606848
+        
+        # 使用CuPy生成随机私钥
+        keys_gpu = cp.random.randint(min_range, max_range, batch_size, dtype=cp.uint64)
+        # 所有匹配标志设为0（在CPU阶段进行完整检查）
+        matches_gpu = cp.zeros(batch_size, dtype=cp.uint8)
+        
+        return keys_gpu, matches_gpu
+    
+    def process_batch_gpu(self, batch_size: int) -> List[Dict[str, Any]]:
+        """使用GPU处理批次"""
         found_keys = []
         
         try:
-            # 生成私钥
-            private_keys_gpu = self.generate_private_keys_gpu(batch_size)
+            # 生成私钥和初步匹配结果
+            keys_gpu, matches_gpu = self.generate_keys_gpu(batch_size)
             
-            # 使用CuPy进行GPU加速的哈希计算
-            # 将私钥转换为字节数组
-            private_keys_bytes = private_keys_gpu.view(cp.uint8).reshape(batch_size, 8)
-            
-            # 在GPU上进行哈希计算
-            hash_results = cp.zeros((batch_size, 32), dtype=cp.uint8)
-            for i in range(batch_size):
-                # 使用CuPy的SHA256（如果可用）或简化的哈希
-                hash_results[i] = cp.asarray(bytearray(cp.asnumpy(private_keys_bytes[i]).tobytes() * 4))[:32]
-            
-            # 简化的地址匹配逻辑
-            # 在实际实现中，这里应该生成完整的比特币地址
-            matches = cp.zeros(batch_size, dtype=cp.bool_)
-            
-            # 将私钥复制到CPU进行处理
-            private_keys_cpu = cp.asnumpy(private_keys_gpu)
+            # 将结果复制到CPU
+            keys_cpu = cp.asnumpy(keys_gpu)
+            matches_cpu = cp.asnumpy(matches_gpu)
             
             # 处理结果
             for i in range(batch_size):
                 if not self.is_running:
                     break
                 
-                # 使用CPU生成完整的比特币地址进行验证
-                private_key = private_keys_cpu[i]
-                address = self._generate_address_cpu(private_key)
+                private_key = keys_cpu[i]
                 
-                if address and address.startswith('1PWo3J'):
-                    wif_key = self._generate_wif_cpu(private_key)
+                # 如果GPU初步匹配或需要完整检查
+                if matches_cpu[i] == 1 or True:  # 暂时对所有密钥进行完整检查
+                    # 生成完整的比特币地址
+                    address = self._generate_address_cpu(private_key)
                     
-                    result = {
-                        'private_key_hex': hex(private_key)[2:].zfill(64),
-                        'private_key_wif': wif_key,
-                        'address': address,
-                        'found_time': time.strftime("%Y-%m-%d %H:%M:%S"),
-                        'batch': self.current_batch
-                    }
-                    
-                    found_keys.append(result)
-                    
-                    with self.lock:
-                        self.total_found += 1
-                        print(f"🎉 找到地址 #{self.total_found}: {address}")
+                    if address and address.startswith('1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU
+'):
+                        wif_key = self._generate_wif_cpu(private_key)
                         
-                        # 立即保存重要发现
-                        self.generated_data["found_keys"].append(result)
-                        self._save_data()
+                result = {
+                            'private_key_hex': hex(private_key)[2:].zfill(64),
+                            'private_key_wif': wif_key,
+                            'address': address,
+                            'found_time': time.strftime("%Y-%m-%d %H:%M:%S"),
+                            'batch': self.current_batch
+                        }
+                        
+                        found_keys.append(result)
+                        
+                        with self.lock:
+                            self.total_found += 1
+                            print(f"🎉 找到地址 #{self.total_found}: {address}")
+                            
+                            # 立即保存重要发现
+                            self.generated_data["found_keys"].append(result)
+                            self._save_data()
             
             # 清理GPU内存
-            del private_keys_gpu
-            del private_keys_bytes
-            del hash_results
-            del matches
+            del keys_gpu
+            del matches_gpu
             
         except Exception as e:
             print(f"GPU处理批次时出错: {e}")
@@ -310,11 +358,7 @@ class PureCuPyBitcoinGenerator:
     def _generate_address_cpu(self, private_key: int) -> str:
         """在CPU上生成比特币地址"""
         try:
-            import hashlib
-            import base58
-            
             # 使用secp256k1曲线生成公钥
-            import ecdsa
             sk = ecdsa.SigningKey.from_string(private_key.to_bytes(32, 'big'), curve=ecdsa.SECP256k1)
             vk = sk.verifying_key
             
@@ -328,6 +372,7 @@ class PureCuPyBitcoinGenerator:
                 public_key = b'\x03' + x.to_bytes(32, 'big')
             
             # SHA256哈希
+            import hashlib
             sha256_hash = hashlib.sha256(public_key).digest()
             
             # RIPEMD160哈希
@@ -354,7 +399,6 @@ class PureCuPyBitcoinGenerator:
         """在CPU上生成WIF格式私钥"""
         try:
             import hashlib
-            import base58
             
             # 添加前缀0x80（主网）和压缩标志0x01
             extended_key = b'\x80' + private_key.to_bytes(32, 'big') + b'\x01'
@@ -375,16 +419,16 @@ class PureCuPyBitcoinGenerator:
             print(f"WIF生成错误: {e}")
             return None
     
-    def run_pure_gpu_generation(self, batch_size: int = 10000, total_batches: int = None):
-        """运行纯GPU密钥生成"""
+    def run_gpu_generation(self, batch_size: int = 10000, total_batches: int = None):
+        """运行GPU密钥生成"""
         self.start_time = time.time()
         self.is_running = True
         
-        print(f"\n🚀 开始GPU加速密钥生成")
+        print(f"\n🚀 开始NVCC编译的GPU密钥生成")
         print(f"目标前缀: 1PWo3J")
         print(f"私钥范围: 2^70 到 2^71")
         print(f"批次大小: {batch_size}")
-        print(f"处理模式: GPU私钥生成 + CPU地址验证")
+        print(f"编译方式: NVCC")
         
         if total_batches:
             print(f"总批次: {total_batches}")
@@ -400,7 +444,7 @@ class PureCuPyBitcoinGenerator:
                 print(f"\n--- 批次 {batch_count + 1} ---")
                 
                 # 处理批次
-                found_keys = self.process_batch_pure_cupy(batch_size)
+                found_keys = self.process_batch_gpu(batch_size)
                 
                 # 更新数据
                 self.generated_data["total_generated"] += batch_size
@@ -413,7 +457,7 @@ class PureCuPyBitcoinGenerator:
                 total_elapsed = time.time() - self.start_time
                 overall_speed = total_keys_generated / total_elapsed
                 
-                print(f"批次完成! 耗时: {batch_time:.1f}秒, 速度: {keys_per_sec:.1f} 密钥/秒")
+                print(f"GPU批次完成! 耗时: {batch_time:.1f}秒, 速度: {keys_per_sec:.1f} 密钥/秒")
                 print(f"本批找到: {len(found_keys)} 个符合条件的地址")
                 print(f"累计找到: {len(self.generated_data['found_keys'])} 个地址")
                 print(f"总速度: {overall_speed:.1f} 密钥/秒")
@@ -447,11 +491,11 @@ class PureCuPyBitcoinGenerator:
     def show_statistics(self):
         """显示统计信息"""
         print("\n" + "="*60)
-        print("📊 GPU比特币密钥生成器 - 统计信息")
+        print("📊 NVCC GPU比特币密钥生成器 - 统计信息")
         print("="*60)
         print(f"总共生成的密钥数量: {self.generated_data['total_generated']:,}")
         print(f"找到的符合条件的地址数量: {len(self.generated_data['found_keys'])}")
-        print(f"处理模式: GPU私钥生成 + CPU地址验证")
+        print(f"编译方式: NVCC")
         print(f"数据最后更新: {self.generated_data.get('last_update', '未知')}")
         
         if self.generated_data['found_keys']:
@@ -468,17 +512,17 @@ class PureCuPyBitcoinGenerator:
         self.cleanup()
 
 def main():
-    print("🚀 GPU比特币密钥生成器 - 腾讯云优化版")
+    print("🚀 NVCC编译的GPU比特币密钥生成器 - 腾讯云优化版")
     print("目标: 寻找以 '1PWo3J' 开头的比特币地址")
-    print("模式: GPU私钥生成 + CPU地址验证")
+    print("编译方式: NVCC (避免GCC版本依赖)")
     
     generator = None
     try:
-        generator = PureCuPyBitcoinGenerator()
+        generator = NVCUBitcoinGenerator()
         
         while True:
             print("\n" + "="*50)
-            print("🔑 GPU比特币密钥生成器")
+            print("🔑 NVCC GPU比特币密钥生成器")
             print("="*50)
             print("1. 快速生成 (1万密钥/批次)")
             print("2. 高性能生成 (10万密钥/批次)") 
@@ -492,17 +536,17 @@ def main():
                 choice = input("\n请选择操作 (1-6): ").strip()
                 
                 if choice == '1':
-                    generator.run_pure_gpu_generation(batch_size=10000, total_batches=10)
+                    generator.run_gpu_generation(batch_size=10000, total_batches=10)
                 elif choice == '2':
-                    generator.run_pure_gpu_generation(batch_size=100000, total_batches=5)
+                    generator.run_gpu_generation(batch_size=100000, total_batches=5)
                 elif choice == '3':
-                    generator.run_pure_gpu_generation(batch_size=500000, total_batches=2)
+                    generator.run_gpu_generation(batch_size=500000, total_batches=2)
                 elif choice == '4':
                     try:
                         batch_size = int(input("请输入每批次密钥数量: "))
                         total_batches = int(input("请输入总批次数量: "))
                         if batch_size > 0 and total_batches > 0:
-                            generator.run_pure_gpu_generation(batch_size=batch_size, total_batches=total_batches)
+                            generator.run_gpu_generation(batch_size=batch_size, total_batches=total_batches)
                         else:
                             print("请输入正数！")
                     except ValueError:
